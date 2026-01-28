@@ -2,8 +2,8 @@ import asyncio
 import uuid
 import os
 import aiosqlite
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, FSInputFile
 from aiogram.filters import CommandStart, Command
 from aiogram.exceptions import TelegramBadRequest
 
@@ -31,7 +31,6 @@ async def init_db():
         await db.commit()
 
 async def set_commands():
-    # Iki ben metu garis miring (/) neng pojok chat member
     commands = [
         BotCommand(command="start", description="Mulai Bot"),
         BotCommand(command="ask", description="Tanya Admin (Sambat)"),
@@ -60,6 +59,72 @@ def join_keyboard(code: str, status: list):
     buttons.append([InlineKeyboardButton(text="🔄 UPDATE / COBA LAGI", callback_data=f"retry:{code}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# ================= FITUR ANYAR (ADMIN & GROUP) =================
+
+# 1. Khusus Admin: Broadcast /all
+@dp.message(Command("all"), F.from_user.id == ADMIN_ID)
+async def broadcast_handler(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.reply("⚠️ Conto: `/all Halo kabeh member!`")
+    
+    pesan = args[1]
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT user_id FROM users") as cursor:
+            rows = await cursor.fetchall()
+    
+    count = 0
+    for row in rows:
+        try:
+            await bot.send_message(row[0], pesan)
+            count += 1
+            await asyncio.sleep(0.05) # Ben ora keno limit
+        except Exception:
+            pass
+    await message.reply(f"✅ Berhasil kirim neng {count} member.")
+
+# 2. Khusus Admin: Kirim DB /senddb
+@dp.message(Command("senddb"), F.from_user.id == ADMIN_ID)
+async def send_db_handler(message: Message):
+    if os.path.exists(DB_NAME):
+        file_db = FSInputFile(DB_NAME, filename="media.db")
+        await bot.send_document(message.chat.id, file_db, caption="Iki db terbarumu su.")
+    else:
+        await message.reply("DB ora ketemu!")
+
+# 3. Fitur Reply Admin (Otomatis kirim neng user)
+@dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.reply_to_message)
+async def reply_admin_handler(message: Message):
+    # Cek opo chat seng direply ono ID user-e
+    reply_text = message.reply_to_message.text or message.reply_to_message.caption
+    if reply_text and "🆔 ID:" in reply_text:
+        try:
+            target_id = int(reply_text.split("🆔 ID:")[1].strip().split("\n")[0].replace("`", ""))
+            await bot.copy_message(target_id, message.chat.id, message.message_id)
+            await message.reply(f"✅ Pesan dikirim neng user `{target_id}`")
+        except Exception as e:
+            await message.reply(f"❌ Gagal kirim: {e}")
+
+# 4. Fitur Grup: Welcome, Leave, & Filter Kata
+@dp.message(F.chat.type.in_({"group", "supergroup"}), F.new_chat_members)
+async def welcome_grup(message: Message):
+    for member in message.new_chat_members:
+        await message.answer(f"Selamat datang {member.mention_html()}, ramein grupnya, BEBAS TAPI SOPAN SU!", parse_mode="HTML")
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}), F.left_chat_member)
+async def leave_grup(message: Message):
+    await message.answer(f"KONTOL NI {message.left_chat_member.mention_html()} MALAH OUT CUIH!", parse_mode="HTML")
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def filter_kata_grup(message: Message):
+    if message.text:
+        if any(kata in message.text.lower() for kata in KATA_KOTOR):
+            try:
+                await message.delete()
+                await message.answer(f"GABOLEH NGETIK ITU DISINI! {message.from_user.mention_html()} SEKALI LAGI GW MUTE ANJING!", parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
+
 # ================= NEW FEATURES (/ASK & /DONASI) =================
 
 @dp.message(Command("ask"))
@@ -69,21 +134,19 @@ async def ask_handler(message: Message):
         return await message.reply("⚠️ Cara menggunakan: `/ask pesan` \nConto: `/ask min link mati`")
     
     pesan_user = args[1]
-    user_info = f"👤 Soko: {message.from_user.full_name}\n🆔 ID: `{message.from_user.id}`"
+    user_info = f"📩 **PESAN ANYAR (ASK)**\n👤 Soko: {message.from_user.full_name}\n🆔 ID: `{message.from_user.id}`"
     
-    # Kirim neng Admin
-    await bot.send_message(ADMIN_ID, f"📩 **PESAN ANYAR (ASK)**\n{user_info}\n\n💬 Pesan: {pesan_user}")
+    await bot.send_message(ADMIN_ID, f"{user_info}\n\n💬 Pesan: {pesan_user}")
     await message.reply("✅ Pesanmu udah dikirim ke admin, silahkan tunggu balasan.")
 
 @dp.message(Command("donasi"))
 async def donasi_start(message: Message):
     await message.answer("🙏 maaciw donasinya.\n\n**Silahkan kirim video/foto serta caption.**\nOtomatis akan diteruskan ke Admin.")
 
-@dp.message(F.chat.type == "private", (F.photo | F.video | F.document) & ~F.from_user.id == ADMIN_ID)
+@dp.message(F.chat.type == "private", (F.photo | F.video | F.document), ~F.from_user.id == ADMIN_ID)
 async def handle_donasi_upload(message: Message):
     user_info = f"🎁 **DONASI/KONTEN ANYAR**\n👤 Soko: {message.from_user.full_name}\n🆔 ID: `{message.from_user.id}`"
     
-    # Forward neng admin
     await bot.send_message(ADMIN_ID, user_info)
     await bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
     await message.reply("✅ File udah dikirim ke admin thanks!.")
@@ -102,7 +165,6 @@ async def start_handler(message: Message):
         return
     await send_media(message.chat.id, message.from_user.id, args[1])
 
-# --- ADMIN FEATURES (Filter ADMIN_ID) ---
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def stats_handler(message: Message):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -112,7 +174,6 @@ async def stats_handler(message: Message):
 
 @dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video), F.chat.type == "private")
 async def admin_upload(message: Message):
-    # Fitur upload media nggo dadi link start
     code = uuid.uuid4().hex[:8]
     f_id = message.photo[-1].file_id if message.photo else message.video.file_id
     m_t = "photo" if message.photo else "video"
@@ -137,7 +198,7 @@ async def send_media(chat_id: int, user_id: int, code: str):
 
 async def main():
     await init_db()
-    await set_commands() # Masang menu garis miring
+    await set_commands()
     print("Bot is Running...")
     await dp.start_polling(bot)
 
