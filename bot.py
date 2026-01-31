@@ -114,18 +114,7 @@ async def reply_admin_handler(message: Message):
         except Exception as e:
             await message.reply(f"❌ Gagal kirim: {e}")
 
-# ================= 2. HANDLER GRUP (FIXED) =================
-
-@dp.message(F.chat.type.in_({"group", "supergroup"}), F.new_chat_members)
-async def welcome_grup(message: Message):
-    for member in message.new_chat_members:
-        await message.answer(f"Selamat datang {member.mention_html()}, ramein grupnya, BEBAS TAPI SOPAN SU!", parse_mode="HTML")
-
-@dp.chat_member(F.chat.type.in_({"group", "supergroup"}))
-async def on_user_leave(event: ChatMemberUpdated):
-    if event.new_chat_member.status in ["left", "kicked"]:
-        user = event.new_chat_member.user
-        await bot.send_message(event.chat.id, f"KONTOL NI {user.mention_html()} MALAH OUT CUIH!", parse_mode="HTML")
+# ================= 2. HANDLER GRUP (FILTER ONLY) =================
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}), F.text)
 async def filter_kata_grup(message: Message):
