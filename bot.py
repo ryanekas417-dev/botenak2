@@ -17,7 +17,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 # Masukkan Username (tanpa @) di Railway pada variabel EXEMPT_USERNAME
 EXEMPT_USERNAME = os.getenv("EXEMPT_USERNAME")
 
-KATA_KOTOR = ["open bo", "promosi", "bio", "byoh", "vcs"]
+KATA_KOTOR = ["biyo", "promosi", "bio", "byoh", "biyoh"]
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -199,3 +199,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
