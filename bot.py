@@ -5,8 +5,8 @@ import aiosqlite
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, BotCommandScopeChat, FSInputFile, CallbackQuery
-from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, BotCommandScopeChat, FSInputFile, CallbackQuery, ChatMemberUpdated
+from aiogram.filters import CommandStart, Command, StateFilter, ChatMemberUpdatedFilter, IS_MEMBER, LEFT
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -14,8 +14,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ================= KONFIGURASI =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else 0
-CH1_USERNAME = os.getenv("CH1_USERNAME") # Ini tujuan auto-post
-CH2_USERNAME = os.getenv("CH2_USERNAME")
+CH1_USERNAME = os.getenv("CH1_USERNAME")
+CH2_USERNAME = os.getenv("CH2_USERNAME") # Target Auto-Post sekarang ke sini
 GROUP_USERNAME = os.getenv("GROUP_USERNAME")
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 
@@ -42,6 +42,34 @@ async def init_db():
         await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
         await db.commit()
 
+# ================= LOG MEMBER JOIN/LEFT =================
+
+@dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=IS_MEMBER))
+async def on_user_join(event: ChatMemberUpdated):
+    user = event.new_chat_member.user
+    text = (
+        f"✅ **MEMBER BERGABUNG**\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👤 Nama: {user.full_name}\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"🔗 Username: @{user.username if user.username else '-'}\n"
+        f"🌐 Chat: {event.chat.title}"
+    )
+    await bot.send_message(LOG_GROUP_ID, text, parse_mode="Markdown")
+
+@dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=LEFT))
+async def on_user_left(event: ChatMemberUpdated):
+    user = event.old_chat_member.user
+    text = (
+        f"❌ **MEMBER KELUAR**\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👤 Nama: {user.full_name}\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"🔗 Username: @{user.username if user.username else '-'}\n"
+        f"🌐 Chat: {event.chat.title}"
+    )
+    await bot.send_message(LOG_GROUP_ID, text, parse_mode="Markdown")
+
 # ================= HELPERS =================
 async def check_membership(user_id: int):
     results = []
@@ -63,20 +91,15 @@ async def send_db(message: Message):
     else:
         await message.reply("DB Kosong.")
 
-# --- PROSES AUTO POST (ADMIN & DONASI) ---
-
 @dp.message(F.chat.type == "private", (F.photo | F.video | F.document | F.animation), StateFilter(None))
 async def admin_or_user_upload(message: Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
-        # Deteksi media admin
         fid = message.photo[-1].file_id if message.photo else (message.video.file_id if message.video else message.document.file_id)
         mtype = "photo" if message.photo else "video"
-        
         await state.update_data(temp_fid=fid, temp_type=mtype)
         await state.set_state(PostMedia.waiting_for_title)
         return await message.reply("📝 **MODE POSTING**\nMasukkan **JUDUL** konten:")
 
-    # User Donasi
     await bot.send_message(LOG_GROUP_ID, f"🎁 **DONASI MASUK**\nDari: {message.from_user.full_name}")
     await bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -107,25 +130,20 @@ async def get_title(m: Message, state: FSMContext):
 async def finalize_and_post_ch(m: Message, state: FSMContext):
     data = await state.get_data()
     code = uuid.uuid4().hex[:8]
-    
-    # Media yang bakal dikasih lewat link
     final_fid = data.get('temp_fid', m.photo[-1].file_id)
     final_type = data.get('temp_type', "photo")
     title = data['title']
     
-    # 1. Simpan ke Database
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT INTO media VALUES (?,?,?,?)", (code, final_fid, final_type, title))
         await db.commit()
     
     link = f"https://t.me/{BOT_USERNAME}?start={code}"
     
-    # 2. AUTO POST KE CHANNEL 1
-    ch_target = CH1_USERNAME if CH1_USERNAME.startswith("@") else f"@{CH1_USERNAME}"
+    # AUTO POST KE CHANNEL 2
+    ch_target = CH2_USERNAME if CH2_USERNAME.startswith("@") else f"@{CH2_USERNAME}"
     caption_ch = f"🔥 **{title}**\n\n👇 **KLIK TOMBOL DIBAWAH** 👇"
-    kb_ch = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎬 TONTON SEKARANG", url=link)]
-    ])
+    kb_ch = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎬 TONTON SEKARANG", url=link)]])
     
     try:
         await bot.send_photo(ch_target, m.photo[-1].file_id, caption=caption_ch, reply_markup=kb_ch, parse_mode="Markdown")
@@ -133,9 +151,8 @@ async def finalize_and_post_ch(m: Message, state: FSMContext):
     except Exception as e:
         post_status = f"❌ Gagal post ke CH: {str(e)}"
 
-    # 3. Notif ke Admin & Log
     await m.answer(f"✅ **SELESAI**\n\n{post_status}\nLink: `{link}`")
-    await bot.send_message(LOG_GROUP_ID, f"📢 **KONTEN PUBLISH**\nJudul: {title}\nLink: {link}\nStatus CH: {post_status}")
+    await bot.send_message(LOG_GROUP_ID, f"📢 **KONTEN PUBLISH**\nJudul: {title}\nLink: {link}")
     await state.clear()
 
 # ================= HANDLERS MEMBER =================
@@ -179,8 +196,6 @@ async def start_handler(message: Message):
 # ================= BOOTING =================
 async def main():
     await init_db()
-    # Set Menu Simple
-    await bot.set_my_commands([BotCommand(command="start", description="Mulai")], scope=BotCommandScopeDefault())
     await bot.delete_webhook(drop_pending_updates=True)
     print("Bot Nyala!")
     await dp.start_polling(bot)
