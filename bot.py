@@ -2,9 +2,15 @@ import asyncio
 import uuid
 import os
 import aiosqlite
+from datetime import datetime, timedelta
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # Install: pip install apscheduler
+
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, FSInputFile, CallbackQuery, ChatMemberUpdated
-from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, FSInputFile, CallbackQuery, ChatPermissions
+from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 
 # ================= KONFIG AMAN =================
@@ -14,16 +20,21 @@ CH2_USERNAME = os.getenv("CH2_USERNAME")
 GROUP_USERNAME = os.getenv("GROUP_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else 0
 BOT_USERNAME = os.getenv("BOT_USERNAME")
-# Masukkan Username (tanpa @) di Railway pada variabel EXEMPT_USERNAME
 EXEMPT_USERNAME = os.getenv("EXEMPT_USERNAME")
 
 KATA_KOTOR = ["biyo", "promosi", "bio", "byoh", "biyoh"]
 
 bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
+scheduler = AsyncIOScheduler()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, "media.db")
+
+# ================= STATE UNTUK POSTING =================
+class PostDonasi(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_photo = State()
 
 # ================= DATABASE & MENU INIT =================
 async def init_db():
@@ -36,9 +47,16 @@ async def set_commands():
     commands = [
         BotCommand(command="start", description="Mulai Bot"),
         BotCommand(command="ask", description="Tanya Admin (Sambat)"),
-        BotCommand(command="donasi", description="Kirim Konten/Donasi")
+        BotCommand(command="donasi", description="Kirim Konten/Donasi"),
+        BotCommand(command="stats", description="Cek Statistik (Admin)")
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+
+# ================= 1. FITUR AUTO BACKUP (SCHEDULER) =================
+async def auto_backup_db():
+    if os.path.exists(DB_NAME):
+        file_db = FSInputFile(DB_NAME, filename=f"backup_{datetime.now().strftime('%Y%m%d')}.db")
+        await bot.send_document(ADMIN_ID, file_db, caption=f"🔄 **AUTO BACKUP DB**\nTanggal: {datetime.now().strftime('%d-%m-%Y')}")
 
 # ================= HELPER =================
 async def check_membership(user_id: int):
@@ -63,110 +81,98 @@ def join_keyboard(code: str, status: list):
     buttons.append([InlineKeyboardButton(text="🔄 UPDATE / COBA LAGI", callback_data=f"retry:{code}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ================= 1. HANDLER KHUSUS ADMIN =================
+def admin_approval_kb(user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ POST", callback_data=f"approve_post:{user_id}"),
+            InlineKeyboardButton(text="❌ REJECT", callback_data=f"reject_post:{user_id}")
+        ]
+    ])
 
-@dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video), F.chat.type == "private")
-async def admin_upload(message: Message):
-    if message.caption and message.caption.startswith("/all"): return
+# ================= 2. HANDLER ADMIN & POSTING =================
+
+@dp.callback_query(F.data.startswith("reject_post:"), F.from_user.id == ADMIN_ID)
+async def reject_donasi(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.answer("Konten ditolak & dihapus.", show_alert=True)
+
+@dp.callback_query(F.data.startswith("approve_post:"), F.from_user.id == ADMIN_ID)
+async def approve_donasi(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.set_state(PostDonasi.waiting_for_title)
+    await callback.message.answer("Sip! Sekarang kirim **JUDUL** buat postingan ini:")
+    await callback.answer()
+
+@dp.message(PostDonasi.waiting_for_title, F.from_user.id == ADMIN_ID)
+async def get_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text)
+    await state.set_state(PostDonasi.waiting_for_photo)
+    await message.answer("Oke, sekarang kirim **FOTO COVER** untuk link ini:")
+
+@dp.message(PostDonasi.waiting_for_photo, F.from_user.id == ADMIN_ID, F.photo)
+async def process_final_post(message: Message, state: FSMContext):
+    data = await state.get_data()
+    title = data['title']
+    cover_photo = message.photo[-1].file_id
     code = uuid.uuid4().hex[:8]
-    f_id = message.photo[-1].file_id if message.photo else message.video.file_id
-    m_t = "photo" if message.photo else "video"
+    
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT OR REPLACE INTO media VALUES (?, ?, ?, ?)", (code, f_id, m_t, message.caption or ""))
+        await db.execute("INSERT INTO media VALUES (?, ?, ?, ?)", (code, cover_photo, "photo", title))
         await db.commit()
-    await message.reply(f"🔗 Link: `https://t.me/{BOT_USERNAME}?start={code}`", parse_mode="Markdown")
+    
+    link = f"https://t.me/{BOT_USERNAME}?start={code}"
+    caption_post = f"🔥 **{title}**\n\n🔗 Link: `{link}`"
+    
+    await bot.send_photo(ADMIN_ID, cover_photo, caption=caption_post, parse_mode="Markdown")
+    await message.answer("✅ Postingan siap! Silahkan copy text di atas.")
+    await state.clear()
 
-@dp.message(Command("all"), F.from_user.id == ADMIN_ID)
-@dp.message(F.from_user.id == ADMIN_ID, F.caption.startswith("/all"))
-async def broadcast_handler(message: Message):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT user_id FROM users") as cursor: rows = await cursor.fetchall()
-    count = 0
-    for row in rows:
-        try:
-            await bot.copy_message(chat_id=row[0], from_chat_id=message.chat.id, message_id=message.message_id)
-            count += 1
-            await asyncio.sleep(0.05)
-        except Exception: pass
-    await message.reply(f"✅ Berhasil kirim neng {count} member.")
-
-@dp.message(Command("senddb"), F.from_user.id == ADMIN_ID)
-async def send_db_handler(message: Message):
-    if os.path.exists(DB_NAME):
-        file_db = FSInputFile(DB_NAME, filename="media.db")
-        await bot.send_document(message.chat.id, file_db, caption="Iki db terbarumu su.")
-    else:
-        await message.reply("DB ora ketemu!")
-
-@dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
-async def stats_handler(message: Message):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as c1: u = await c1.fetchone()
-        async with db.execute("SELECT COUNT(*) FROM media") as c2: m = await c2.fetchone()
-    await message.answer(f"📊 Stats:\nUsers: {u[0]}\nMedia: {m[0]}")
-
-@dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.reply_to_message)
-async def reply_admin_handler(message: Message):
-    reply_text = message.reply_to_message.text or message.reply_to_message.caption
-    if reply_text and "🆔 ID:" in reply_text:
-        try:
-            target_id = int(reply_text.split("🆔 ID:")[1].strip().split("\n")[0].replace("`", ""))
-            await bot.copy_message(target_id, message.chat.id, message.message_id)
-            await message.reply(f"✅ Pesan dikirim neng user `{target_id}`")
-        except Exception as e:
-            await message.reply(f"❌ Gagal kirim: {e}")
-
-# ================= 2. HANDLER GRUP (FILTER ONLY) =================
+# ================= 3. FITUR AUTO-MUTE (DI GRUP) =================
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}), F.text)
 async def filter_kata_grup(message: Message):
-    # Ambil username pengirim tanpa simbol @
     current_username = message.from_user.username
-    
-    # Cek apakah user adalah admin atau username-nya dikecualikan
     if message.from_user.id == ADMIN_ID or (current_username and current_username.lower() == EXEMPT_USERNAME.lower()):
         return
         
     if any(kata in message.text.lower() for kata in KATA_KOTOR):
         try:
             await message.delete()
-            await message.answer(f"TOLOL {message.from_user.mention_html()} GABOLEH NGETIK ITU DISINI, SEKALI LAGI GW MUTE!", parse_mode="HTML")
+            # Mute user selama 24 jam
+            until_date = datetime.now() + timedelta(hours=24)
+            await bot.restrict_chat_member(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+            await message.answer(f"🚫 {message.from_user.mention_html()} DI-MUTE 24 JAM karena ngetik kata terlarang!", parse_mode="HTML")
+            
+            # FITUR LOGS: Kirim ke Admin
+            await bot.send_message(ADMIN_ID, f"📢 **LOG MUTE**\nUser: {message.from_user.full_name}\nID: `{message.from_user.id}`\nKata: {message.text}")
         except Exception: pass
 
-# ================= 3. HANDLER USER & FITUR UMUM =================
-
-@dp.callback_query(F.data.startswith("retry:"))
-async def retry_callback(callback: CallbackQuery):
-    code = callback.data.split(":")[1]
-    status = await check_membership(callback.from_user.id)
-    if all(status):
-        await callback.message.delete()
-        await send_media(callback.message.chat.id, callback.from_user.id, code)
-    else:
-        await callback.answer("⚠️ kamu blom join semua!", show_alert=True)
+# ================= 4. FITUR LOGS (NOTIF START) =================
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def start_handler(message: Message):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
         await db.commit()
+    
     args = message.text.split(" ", 1)
     if len(args) == 1:
+        # LOGS: Notif user baru buka bot
+        await bot.send_message(ADMIN_ID, f"👤 **USER AKTIF**\nNama: {message.from_user.full_name}\nID: `{message.from_user.id}`")
         await message.answer("👋 aloo sayang ketik / buat lihat daftar fitur.")
         return
     await send_media(message.chat.id, message.from_user.id, args[1])
 
-@dp.message(Command("ask"))
-async def ask_handler(message: Message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.reply("⚠️ Cara: `/ask pesan` ")
-    user_info = f"📩 **PESAN ANYAR (ASK)**\n👤 Soko: {message.from_user.full_name}\n🆔 ID: `{message.from_user.id}`"
-    await bot.send_message(ADMIN_ID, f"{user_info}\n\n💬 Pesan: {args[1]}", parse_mode="Markdown")
-    await message.reply("✅ Pesanmu udah dikirim ke admin.")
+# ================= HANDLER UMUM LAINNYA =================
 
 @dp.message(Command("donasi"))
 async def donasi_start(message: Message):
-    await message.answer("🙏 maaciw donasinya.\n\n**Silahkan kirim video/foto serta caption.**\nOtomatis akan diteruskan ke Admin.")
+    await message.answer("🙏 maaciw donasinya.\n\n**Silahkan kirim video/foto.**\nOtomatis akan diteruskan ke Admin untuk direview.")
 
 @dp.message(F.chat.type == "private", (F.photo | F.video | F.document))
 async def handle_donasi_upload(message: Message):
@@ -175,10 +181,9 @@ async def handle_donasi_upload(message: Message):
     try:
         await bot.send_message(ADMIN_ID, user_info, parse_mode="Markdown")
         await bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
+        await bot.send_message(ADMIN_ID, "Mau diposting konten di atas?", reply_markup=admin_approval_kb(message.from_user.id))
         await message.reply("✅ File udah dikirim ke admin thanks!.")
     except Exception: pass
-
-# ================= SYSTEM & POLLING =================
 
 async def send_media(chat_id: int, user_id: int, code: str):
     status = await check_membership(user_id)
@@ -191,12 +196,18 @@ async def send_media(chat_id: int, user_id: int, code: str):
     if row[1] == "photo": await bot.send_photo(chat_id, row[0], caption=row[2], protect_content=True)
     else: await bot.send_video(chat_id, row[0], caption=row[2], protect_content=True)
 
+# ================= SYSTEM & POLLING =================
+
 async def main():
     await init_db()
     await set_commands()
+    
+    # Setup Scheduler untuk Backup DB setiap jam 00:00
+    scheduler.add_job(auto_backup_db, 'cron', hour=0, minute=0)
+    scheduler.start()
+    
     print("Bot is Running...")
-    await dp.start_polling(bot, allowed_updates=["message", "chat_member", "callback_query"])
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
