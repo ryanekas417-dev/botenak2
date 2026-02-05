@@ -2,28 +2,19 @@ import asyncio, os, aiosqlite, traceback, random, string
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton, 
-    BotCommand, BotCommandScopeDefault, FSInputFile, CallbackQuery, ChatMemberUpdated, ChatPermissions)
+    BotCommand, BotCommandScopeDefault, BotCommandScopeChat, FSInputFile, CallbackQuery, ChatMemberUpdated, ChatPermissions)
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.exceptions import TelegramBadRequest
 
-# ================= CONFIG (PASTIKAN DIISI!) =================
-# Jika pakai VPS/Heroku, isi di environment variable. Jika lokal, langsung ganti stringnya.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ISI_TOKEN_BOT_DI_SINI")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 123456789)) # Ganti dengan ID kamu
-BOT_USN = os.getenv("BOT_USERNAME", "UsernameBotTanpaAt")
-
-# Proteksi agar tidak error TokenValidationError
-if not BOT_TOKEN or BOT_TOKEN == "ISI_TOKEN_BOT_DI_SINI":
-    print("❌ ERROR: BOT_TOKEN belum diisi dengan benar!")
-    exit()
+# ================= CONFIG =================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ISI_TOKEN_DISINI")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
+BOT_USN = os.getenv("BOT_USERNAME", "UsernameBot")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-KATA_TERLARANG = ["biyo", "promosi", "biyoh", "bio", "open bo"]
 
 class BotState(StatesGroup):
     wait_title = State()
@@ -33,7 +24,6 @@ class BotState(StatesGroup):
     set_val = State()
 
 def gen_code():
-    # Menggunakan 30 karakter sesuai permintaan sebelumnya
     char = ''.join(random.choices(string.ascii_letters + string.digits, k=30))
     return f"get_{char}"
 
@@ -57,64 +47,36 @@ async def get_conf():
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM settings WHERE id=1") as cur: return await cur.fetchone()
 
-# ================= 1. ANTI-KATA TERLARANG & AUTO MUTE =================
-@dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def group_filter(m: Message):
-    if not m.text: return
-    s = await get_conf()
-    # Pengecekan Exempt (Admin Kebal)
-    exempt = [str(ADMIN_ID)] + (s['exempt_usn'].lower().replace("@","").split(",") if s['exempt_usn'] else [])
-    user_ref = str(m.from_user.id) if not m.from_user.username else m.from_user.username.lower()
+# ================= HELPER: TOMBOL BATAL =================
+def kb_batal():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ BATAL", callback_data="exit_state")]])
 
-    if user_ref in exempt or str(m.from_user.id) in exempt: return
+@dp.callback_query(F.data == "exit_state")
+async def exit_state_handler(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.delete()
+    await c.answer("Aksi dibatalkan.")
 
-    if any(word in m.text.lower() for word in KATA_TERLARANG):
-        try:
-            await m.delete()
-            await bot.restrict_chat_member(
-                m.chat.id, m.from_user.id,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=datetime.now() + timedelta(hours=24)
-            )
-            await m.answer(f"🔇 **AUTO-MUTE 24 JAM**\n{m.from_user.full_name} menggunakan kata terlarang.")
-        except: pass
-
-# ================= 2. LOG JOIN/LEFT (NEW) =================
-@dp.chat_member()
-async def log_member_activity(update: ChatMemberUpdated):
-    s = await get_conf()
-    if not s['log_id']: return
-    user = update.from_user
-    chat = update.chat
-    
-    if update.new_chat_member.status == "member":
-        txt = f"🆕 **LOG JOIN**\n👤 {user.full_name}\n🆔 `{user.id}`\n🌐 GC: {chat.title}"
-    elif update.new_chat_member.status in ["left", "kicked"]:
-        txt = f"🚪 **LOG LEFT**\n👤 {user.full_name}\n🆔 `{user.id}`\n🌐 GC: {chat.title}"
-    else: return
-    
-    try: await bot.send_message(s['log_id'], txt)
-    except: pass
-
-# ================= 3. ADMIN DASHBOARD =================
+# ================= 1. ADMIN DASHBOARD =================
 @dp.message(Command("settings"), F.from_user.id == ADMIN_ID)
 async def cmd_settings(m: Message):
     s = await get_conf()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Teks Start", callback_data="conf_start_txt"), InlineKeyboardButton(text="Teks FSub", callback_data="conf_fsub_txt")],
-        [InlineKeyboardButton(text="Link FSub", callback_data="conf_fsub_link"), InlineKeyboardButton(text="Username FSub", callback_data="conf_fsub_list")],
+        [InlineKeyboardButton(text="Link FSub", callback_data="conf_fsub_link"), InlineKeyboardButton(text="List User FSub", callback_data="conf_fsub_list")],
+        [InlineKeyboardButton(text="ID CH DB", callback_data="conf_db_ch_id"), InlineKeyboardButton(text="ID CH Post", callback_data="conf_post_ch_id")],
         [InlineKeyboardButton(text="ID Log", callback_data="conf_log_id"), InlineKeyboardButton(text="Exempt Admin", callback_data="conf_exempt_usn")],
-        [InlineKeyboardButton(text="Stats", callback_data="adm_stats"), InlineKeyboardButton(text="Backup DB", callback_data="adm_dbfile")],
-        [InlineKeyboardButton(text="❌ TUTUP", callback_data="adm_close")]
+        [InlineKeyboardButton(text="📊 Stats", callback_data="adm_stats"), InlineKeyboardButton(text="💾 Backup", callback_data="adm_dbfile")],
+        [InlineKeyboardButton(text="❌ TUTUP", callback_data="exit_state")]
     ])
-    await m.answer("⚙️ **ADMIN SETTINGS PANEL**", reply_markup=kb)
+    await m.answer("⚙️ **ADMIN PANEL**\nSilakan pilih menu yang ingin diubah:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("conf_"))
 async def config_edit(c: CallbackQuery, state: FSMContext):
     field = c.data.replace("conf_", "")
     await state.update_data(field=field)
     await state.set_state(BotState.set_val)
-    await c.message.edit_text(f"Kirim nilai baru untuk `{field}`:\n(Gunakan -100 untuk ID Channel)")
+    await c.message.edit_text(f"Kirim nilai baru untuk `{field}`:", reply_markup=kb_batal())
 
 @dp.message(BotState.set_val)
 async def config_save(m: Message, state: FSMContext):
@@ -122,79 +84,82 @@ async def config_save(m: Message, state: FSMContext):
     async with aiosqlite.connect("master.db") as db:
         await db.execute(f"UPDATE settings SET {data['field']}=? WHERE id=1", (m.text,))
         await db.commit()
-    await m.answer(f"✅ `{data['field']}` berhasil diperbarui.")
+    await m.answer(f"✅ Berhasil simpan `{data['field']}`.")
     await state.clear()
 
-# ================= 4. DATABASE & AUTO-POST =================
+# ================= 2. AUTO POST & DONASI =================
 @dp.message(F.chat.type == "private", (F.photo | F.video | F.document | F.animation), StateFilter(None))
 async def upload_manager(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
-        # Donasi System
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ APPROVE", callback_data=f"don_app_{m.from_user.id}_{m.message_id}")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ APPROVE", callback_data=f"don_app_{m.from_user.id}_{m.message_id}"),
+             InlineKeyboardButton(text="❌ REJECT", callback_data="exit_state")]
+        ])
         await bot.forward_message(ADMIN_ID, m.chat.id, m.message_id)
         await bot.send_message(ADMIN_ID, f"🎁 Donasi: {m.from_user.full_name}", reply_markup=kb)
-        return await m.answer("✅ Terkirim ke admin.")
+        return await m.answer("✅ Donasi terkirim ke admin.")
 
     fid = m.photo[-1].file_id if m.photo else (m.video.file_id if m.video else m.document.file_id)
     mtype = "photo" if m.photo else ("video" if m.video else "doc")
     await state.update_data(fid=fid, mtype=mtype)
     await state.set_state(BotState.wait_title)
-    await m.answer("🏷️ Masukkan JUDUL konten:")
+    await m.answer("🏷️ Masukkan JUDUL konten:", reply_markup=kb_batal())
+
+@dp.callback_query(F.data.startswith("don_app_"))
+async def donasi_approve(c: CallbackQuery, state: FSMContext):
+    parts = c.data.split("_")
+    uid, mid = parts[2], parts[3]
+    msg = await bot.forward_message(ADMIN_ID, uid, int(mid))
+    fid = msg.photo[-1].file_id if msg.photo else (msg.video.file_id if msg.video else msg.document.file_id)
+    mtype = "photo" if msg.photo else ("video" if msg.video else "doc")
+    await state.update_data(fid=fid, mtype=mtype)
+    await state.set_state(BotState.wait_title)
+    await c.message.answer("Donasi diterima. Masukkan JUDUL:", reply_markup=kb_batal())
 
 @dp.message(BotState.wait_title)
 async def get_title(m: Message, state: FSMContext):
     await state.update_data(title=m.text)
     await state.set_state(BotState.wait_cover)
-    await m.answer("📸 Kirim FOTO COVER:")
+    await m.answer("📸 Kirim FOTO COVER:", reply_markup=kb_batal())
 
 @dp.message(BotState.wait_cover, F.photo)
-async def finalize_upload(m: Message, state: FSMContext):
+async def finalize_post(m: Message, state: FSMContext):
     try:
         data = await state.get_data()
         s = await get_conf()
         code = gen_code()
         
-        # Backup ke CH DB
         bk_id = ""
         if s['db_ch_id']:
-            bk = await bot.send_photo(s['db_ch_id'], m.photo[-1].file_id, caption=f"KODE: `{code}`\nJUDUL: {data['title']}")
+            bk = await bot.send_photo(s['db_ch_id'], m.photo[-1].file_id, caption=f"KODE: `{code}`\nTITLE: {data['title']}")
             bk_id = str(bk.message_id)
         
         async with aiosqlite.connect("master.db") as db:
             await db.execute("INSERT INTO media VALUES (?,?,?,?,?)", (code, data['fid'], data['mtype'], data['title'], bk_id))
             await db.commit()
 
-        # Post ke CH Post
         if s['post_ch_id']:
-            link = f"https://t.me/{BOT_USN}?start={code}"
+            link = f"https://t.me/{emsamasamaenak_bot}?start={code}"
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=s['btn_nonton'], url=link)]])
             await bot.send_photo(s['post_ch_id'], m.photo[-1].file_id, caption=data['title'], reply_markup=kb)
         
-        await m.answer(f"✅ POSTED!\nLink: `https://t.me/{BOT_USN}?start={code}`")
+        await m.answer(f"✅ BERHASIL!\nLink: `https://t.me/{emsamasamaenak_bot}?start={code}")
     finally: await state.clear()
 
-# ================= 5. MEMBER INTERACTION =================
+# ================= 3. MEMBER INTERACTION =================
 @dp.message(CommandStart())
-async def start_logic(m: Message, code_override=None):
+async def start_handler(m: Message, code_override=None):
     s = await get_conf()
     arg = code_override if code_override else (m.text.split()[1] if len(m.text.split()) > 1 else None)
     
-    # Simpan user stats & Log Start pertama kali
-    async with aiosqlite.connect("master.db") as db:
-        cur = await db.execute("SELECT uid FROM users WHERE uid=?", (m.from_user.id,))
-        if not await cur.fetchone():
-            await db.execute("INSERT INTO users VALUES (?,?)", (m.from_user.id, m.from_user.full_name))
-            await db.commit()
-            if s['log_id']:
-                await bot.send_message(s['log_id'], f"🚀 **NEW USER START**\n👤 {m.from_user.full_name}\n🆔 `{m.from_user.id}`")
-
     if not arg:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=s['btn_donasi'], callback_data="mem_donasi"), InlineKeyboardButton(text=s['btn_ask'], callback_data="mem_ask")]
+            [InlineKeyboardButton(text=s['btn_donasi'], callback_data="mem_don"), 
+             InlineKeyboardButton(text=s['btn_ask'], callback_data="mem_ask")]
         ])
         return await m.answer(s['start_txt'], reply_markup=kb)
 
-    # Force Join 3 Tempat (CH1, CH2, GRUP)
+    # Force Join Check
     must_join = False
     if s['fsub_list']:
         for ch in s['fsub_list'].replace("@","").split(","):
@@ -207,11 +172,10 @@ async def start_logic(m: Message, code_override=None):
 
     if must_join:
         kb = []
-        if s['fsub_link']: kb.append([InlineKeyboardButton(text="🔗 GABUNG CHANNEL", url=s['fsub_link'])])
+        if s['fsub_link']: kb.append([InlineKeyboardButton(text="🔗 JOIN CHANNEL", url=s['fsub_link'])])
         kb.append([InlineKeyboardButton(text="🔄 COBA LAGI", callback_data=f"retry_{arg}")])
         return await m.answer(s['fsub_txt'], reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-    # Panggil Media
     async with aiosqlite.connect("master.db") as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM media WHERE code=?", (arg,)) as cur: row = await cur.fetchone()
@@ -219,48 +183,35 @@ async def start_logic(m: Message, code_override=None):
     if row:
         if row['mtype'] == "photo": await bot.send_photo(m.chat.id, row['fid'], caption=row['title'])
         else: await bot.send_video(m.chat.id, row['fid'], caption=row['title'])
-    else:
-        await m.answer("❌ Konten tidak ditemukan.")
+
+@dp.callback_query(F.data == "mem_don")
+async def mem_don_cb(c: CallbackQuery):
+    await c.message.answer("🎁 Silakan kirim media donasi kamu langsung ke chat ini.")
+    await c.answer()
 
 @dp.callback_query(F.data.startswith("retry_"))
 async def retry_cb(c: CallbackQuery):
     code = c.data.replace("retry_", "")
     await c.message.delete()
-    await start_logic(c.message, code_override=code)
-
-@dp.callback_query(F.data == "mem_ask")
-async def ask_btn(c: CallbackQuery, state: FSMContext):
-    await state.set_state(BotState.wait_ask)
-    await c.message.answer("💬 Kirim pesan kamu untuk admin:")
-
-@dp.message(BotState.wait_ask)
-async def ask_process(m: Message, state: FSMContext):
-    await bot.send_message(ADMIN_ID, f"📩 **PESAN ASK**\nDari: {m.from_user.full_name}\n\n{m.text}")
-    await m.answer("✅ Terkirim.")
-    await state.clear()
-
-# ================= 6. STATS & BC =================
-@dp.callback_query(F.data == "adm_stats")
-async def stats_cb(c: CallbackQuery):
-    async with aiosqlite.connect("master.db") as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as c1: u = await c1.fetchone()
-        async with db.execute("SELECT COUNT(*) FROM media") as c2: m = await c2.fetchone()
-    await c.answer(f"📊 User: {u[0]} | Media: {m[0]}", show_alert=True)
-
-@dp.callback_query(F.data == "adm_dbfile")
-async def backup_cb(c: CallbackQuery):
-    await c.message.answer_document(FSInputFile("master.db"))
-
-@dp.callback_query(F.data == "adm_close")
-async def close_cb(c: CallbackQuery): await c.message.delete()
+    await start_handler(c.message, code_override=code)
 
 # ================= RUN =================
 async def main():
     await init_db()
+    
+    # Menu Member (Tanpa /settings)
     await bot.set_my_commands([
         BotCommand(command="start", description="Mulai Bot"),
-        BotCommand(command="settings", description="Admin Only")
-    ])
+        BotCommand(command="ask", description="Tanya Admin")
+    ], scope=BotCommandScopeDefault())
+    
+    # Menu Admin (Ada /settings)
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Mulai Bot"),
+        BotCommand(command="settings", description="Panel Admin"),
+        BotCommand(command="stats", description="Cek Statistik")
+    ], scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
