@@ -82,152 +82,7 @@ def set_default(key, value):
 set_default("start_text", "Selamat datang 👋")
 set_default("forbidden_words", "biyo,promosi,bio,biyoh")
 set_default("fsub_links", "")
-
-# =============================
-# HELPERS
-# =============================
-def is_admin(uid: int):
-    return uid in ADMIN_IDS
-
-async def check_fsub(user_id: int):
-    cur.execute("SELECT value FROM settings WHERE key='fsub_links'")
-    row = cur.fetchone()
-    if not row or not row[0]:
-        return True
-    links = row[0].split("|")
-    for ch in links:
-        try:
-            member = await bot.get_chat_member(ch, user_id)
-            if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                return False
-        except:
-            return False
-    return True
-
-# =============================
-# START
-# =============================
-@dp.message(CommandStart())
-async def start(message: Message):
-    uid = message.from_user.id
-    cur.execute(
-        "INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
-        (
-            uid,
-            message.from_user.username,
-            message.from_user.first_name,
-            datetime.now().isoformat()
-        )
-    )
-    conn.commit()
-
-    if not await check_fsub(uid):
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 COBA LAGI", callback_data="retry_fsub")]
-        ])
-        return await message.answer("🚫 Kamu belum join semua channel wajib", reply_markup=kb)
-
-    cur.execute("SELECT value FROM settings WHERE key='start_text'")
-    text = cur.fetchone()[0]
-    await message.answer(text)
-
-# =============================
-# FSUB RETRY
-# =============================
-@dp.callback_query(F.data == "retry_fsub")
-async def retry(call: CallbackQuery):
-    if await check_fsub(call.from_user.id):
-        await call.message.edit_text("✅ Akses dibuka")
-    else:
-        await call.answer("Masih belum join", show_alert=True)
-
-# =============================
-# FILTER KATA + MUTE
-# =============================
-@dp.message(F.chat.type.in_([ChatType.GROUP, ChatType.SUPERGROUP]))
-async def filter_words(message: Message):
-    if message.from_user.id in ADMIN_IDS:
-        return
-    cur.execute("SELECT value FROM settings WHERE key='forbidden_words'")
-    words = cur.fetchone()[0].split(",")
-    text = (message.text or "").lower()
-    if any(w in text for w in words):
-        try:
-            await message.delete()
-            await bot.restrict_chat_member(
-                message.chat.id,
-                message.from_user.id,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=datetime.now() + timedelta(hours=24)
-            )
-        except:
-            pass
-
-# =============================
-# SAVE MEDIA (ADMIN)
-# =============================
-@dp.message(F.content_type.in_([
-    ContentType.PHOTO,
-    ContentType.VIDEO,
-    ContentType.DOCUMENT,
-    ContentType.ANIMATION
-]))
-async def save_media(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    code = uuid.uuid4().hex[:8]
-    file = message.photo[-1].file_id if message.photo else message.video.file_id if message.video else message.document.file_id if message.document else message.animation.file_id
-    ftype = message.content_type
-    cur.execute("INSERT INTO media VALUES (?,?,?,?)", (code, file, ftype, datetime.now().isoformat()))
-    conn.commit()
-    await message.reply(f"✅ Disimpan\nKode: <code>{code}</code>\nLink: t.me/{(await bot.me()).username}?start={code}")
-
-# =============================
-# GET MEDIA BY CODE
-# =============================
-@dp.message(Command("start"))
-async def start_code(message: Message):
-    args = message.text.split()
-    if len(args) == 1:
-        return
-    code = args[1]
-    cur.execute("SELECT file_id, file_type FROM media WHERE code=?", (code,))
-    row = cur.fetchone()
-    if not row:
-        return await message.answer("❌ Konten tidak ditemukan")
-    file_id, ftype = row
-    if ftype == ContentType.PHOTO:
-        await message.answer_photo(file_id)
-    elif ftype == ContentType.VIDEO:
-        await message.answer_video(file_id)
-    elif ftype == ContentType.DOCUMENT:
-        await message.answer_document(file_id)
-    else:
-        await message.answer_animation(file_id)
-
-# =============================
-# STATS
-# =============================
-@dp.message(Command("stats"))
-async def stats(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    cur.execute("SELECT COUNT(*) FROM users")
-    users = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM media")
-    media = cur.fetchone()[0]
-    await message.answer(f"👤 Users: {users}\n🎞 Media: {media}")
-
-# =============================
-# SEND DB
-# =============================
-@dp.message(Command("senddb"))
-async def senddb(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    await message.answer_document(FSInputFile("media.db"))
-
-# =============================
+set_default("fsub_join_link", "")=====
 # RUN
 # =============================
 async def main():
@@ -235,3 +90,10 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+if not await check_fsub(uid):
+        cur.execute("SELECT value FROM settings WHERE key='fsub_join_link'")
+        join_link = cur.fetchone()[0]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 JOIN SEKARANG", url=join_link)] if join_link else [],
+            [InlineKeyboardButton(text="🔄 COBA LAGI", callback_data="retry_fsub")]
+        ])
