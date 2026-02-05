@@ -16,7 +16,7 @@ ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "123456789").split(",")))
 
 # ================== INIT ==================
 logging.basicConfig(level=logging.INFO)
-bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML")
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher(storage=MemoryStorage())
 
 # ================== DATABASE ==================
@@ -183,4 +183,5 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
