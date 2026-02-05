@@ -54,7 +54,6 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 
 conn.commit()
-
 );
 
 CREATE TABLE IF NOT EXISTS media (
@@ -406,4 +405,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
