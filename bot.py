@@ -47,7 +47,6 @@ def set_setting(key, val):
     db.commit()
 
 def gen_code():
-    import string, random
     return ''.join(random.choices(string.ascii_letters+string.digits, k=8))
 
 # ================== ADMIN PANEL ==================
@@ -60,6 +59,7 @@ async def settings_panel(msg: Message):
         [InlineKeyboardButton(text="🔒 Set Force Sub", callback_data="set:fsub")],
         [InlineKeyboardButton(text="✏️ Set Teks Start", callback_data="set:start")],
         [InlineKeyboardButton(text="📝 Set Exempt Username", callback_data="set:exempt")],
+        [InlineKeyboardButton(text="🚫 Set Kata Terlarang", callback_data="set:badwords")],
     ])
     await msg.answer("⚙️ PANEL ADMIN", reply_markup=kb)
 
@@ -81,13 +81,12 @@ async def save_setting(msg: Message, state: FSMContext):
 
 # ================== START & FORCE JOIN ==================
 async def check_force_join(user_id):
-    # ambil daftar channel/grup wajib join dari DB
     fsub = get_setting("fsub")
     if not fsub: return True
     ids = fsub.split(",")
     for cid in ids:
         try:
-            member = await bot.get_chat_member(int(cid), user_id)
+            member = await bot.get_chat_member(int(cid.strip()), user_id)
             if member.status not in ("member","administrator","creator"):
                 return False
         except: return False
@@ -114,11 +113,15 @@ async def start(msg: Message):
                 await msg.answer_video(r[0], caption=r[2])
             elif r[1]=="document":
                 await msg.answer_document(r[0], caption=r[2])
-            else:
-                await msg.answer(r[2] or "")
+            elif r[1]=="animation":
+                await msg.answer_animation(r[0], caption=r[2])
             return
     text = get_setting("start","Selamat datang 👋")
-    await msg.answer(text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Tanya Admin", callback_data="ask:start")],
+        [InlineKeyboardButton(text="🎁 Donasi Konten", callback_data="donasi:start")]
+    ])
+    await msg.answer(text, reply_markup=kb)
 
 @dp.callback_query(F.data=="retry")
 async def retry(cb: CallbackQuery):
@@ -128,15 +131,14 @@ async def retry(cb: CallbackQuery):
         await cb.answer("Belum join semua!")
 
 # ================== FILTER KATA ==================
-BAD_WORDS = ["biyo","biyoh","promosi","bio"]
-
 @dp.message(F.text, F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def filter_word(msg: Message):
     exempt = get_setting("exempt","").split(",")
+    badwords = get_setting("badwords","biyo,biyoh,promosi,bio").split(",")
     if msg.from_user.id in ADMIN_IDS or (msg.from_user.username and msg.from_user.username in exempt):
         return
-    for w in BAD_WORDS:
-        if w in msg.text.lower():
+    for w in badwords:
+        if w.strip() and w.strip().lower() in msg.text.lower():
             try:
                 await msg.delete()
                 await bot.restrict_chat_member(
@@ -159,11 +161,9 @@ async def save_media(msg: Message):
     else: return
     c.execute("INSERT INTO media VALUES (?,?,?,?,?)",(code,file_id,mtype,msg.caption or "",datetime.now().isoformat()))
     db.commit()
-    # backup ke channel DB
     dbch = get_setting("db")
     if dbch:
         await bot.copy_message(int(dbch), msg.chat.id, msg.message_id)
-    # auto post ke channel post
     postch = get_setting("post")
     if postch:
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -171,22 +171,24 @@ async def save_media(msg: Message):
         ])
         await bot.send_message(int(postch), msg.caption or "Konten baru", reply_markup=kb)
 
-# ================== STATS & SENDDB ==================
-@dp.message(Command("stats"))
-async def stats(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    u = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    m = c.execute("SELECT COUNT(*) FROM media").fetchone()[0]
-    await msg.answer(f"👤 User: {u}\n📦 Media: {m}")
+# ================== DONASI ==================
+class DonasiState(StatesGroup):
+    waiting = State()
 
-@dp.message(Command("senddb"))
-async def senddb(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    await msg.answer_document(FSInputFile("bot.db"))
+@dp.callback_query(F.data=="donasi:start")
+async def donasi_start(cb: CallbackQuery, state:FSMContext):
+    await state.set_state(DonasiState.waiting)
+    await cb.message.edit_text("Kirim foto/video donasi sekarang")
 
-# ================== RUN ==================
-async def main():
-    await dp.start_polling(bot)
+@dp.message(DonasiState.waiting, F.content_type.in_({"photo","video"}))
+async def donasi_receive(msg: Message, state:FSMContext):
+    for admin in ADMIN_IDS:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Approve", callback_data=f"approve:{msg.chat.id}:{msg.message_id}")]
+        ])
+        await bot.send_message(admin, f"Donasi dari @{msg.from_user.username or msg.from_user.id}", reply_markup=kb)
+    await state.clear()
 
-if __name__ == '__main__':
-    asyncio.run(main())
+@dp.callback_query(F.data.startswith("approve:"))
+async def approve(cb: CallbackQuery):
+    _, chat_id, mid =
