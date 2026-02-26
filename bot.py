@@ -29,6 +29,7 @@ DB_NAME = os.path.join(BASE_DIR, "media.db")
 # ================= STATES =================
 class AdminStates(StatesGroup):
     waiting_for_channel_post = State()
+    waiting_for_vip_group = State()
     waiting_for_fsub_list = State()
     waiting_for_broadcast = State()
     waiting_for_reply = State()
@@ -57,6 +58,22 @@ async def init_db():
         await db.execute("CREATE TABLE IF NOT EXISTS titles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)")
         await db.commit()
 
+# ================= PAYMENT DATABASE =================
+async def init_payment_table():
+    async with aiosqlite.connect(DB_NAME) as db:
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            invoice_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            amount INTEGER,
+            status TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        await db.commit()
+
 async def get_config(key, default=None):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT value FROM config WHERE key=?", (key,)) as cursor:
@@ -67,6 +84,31 @@ async def set_config(key, value):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
         await db.commit()
+
+# ================= VIP INVITE LINK =================
+async def send_vip_link(user_id: int):
+
+    vip_group = await get_config("vip_group")
+
+    if not vip_group:
+        await bot.send_message(user_id, "❌ VIP group belum diset admin")
+        return
+
+    try:
+
+        link = await bot.create_chat_invite_link(
+            chat_id=vip_group,
+            member_limit=1
+        )
+
+        await bot.send_message(
+            user_id,
+            f"✅ Payment diterima!\n\nLink VIP kamu:\n{link.invite_link}"
+        )
+
+    except Exception as e:
+
+        await bot.send_message(user_id, f"❌ Error: {e}")
 
 async def is_admin(user_id: int):
     if user_id == OWNER_ID: return True
@@ -295,6 +337,7 @@ async def admin_panel(message: Message):
         [InlineKeyboardButton(text="⚙️ SETTINGS", callback_data="open_settings")],
         [InlineKeyboardButton(text="🖼 COVER", callback_data="set_cover"), InlineKeyboardButton(text="🖼 QRIS", callback_data="set_qris")],
         [InlineKeyboardButton(text="📺 PREVIEW", callback_data="set_preview")],
+        [InlineKeyboardButton(text="👑 VIP GROUP", callback_data="set_vip_group")],
         [InlineKeyboardButton(text="📡 BC", callback_data="menu_broadcast"), InlineKeyboardButton(text="📦 DB", callback_data="menu_db")],
         [InlineKeyboardButton(text="❌ TUTUP", callback_data="close_panel")]
     ]
@@ -375,6 +418,27 @@ async def btn_set_prev(c: CallbackQuery, state: FSMContext):
 async def save_preview(m: Message, state: FSMContext):
     await set_config("preview_msg_id", str(m.message_id)); await m.reply("✅ OK."); await state.clear()
 
+# ================= SET VIP GROUP =================
+@dp.callback_query(F.data == "set_vip_group")
+async def set_vip_group_btn(c: CallbackQuery, state: FSMContext):
+
+    if not await is_admin(c.from_user.id):
+        return
+
+    await c.message.answer("Kirim username group VIP\ncontoh:\n@vipgroup")
+
+    await state.set_state(AdminStates.waiting_for_vip_group)
+
+
+@dp.message(AdminStates.waiting_for_vip_group)
+async def save_vip_group(m: Message, state: FSMContext):
+
+    await set_config("vip_group", m.text.strip())
+
+    await m.reply("✅ VIP group set")
+
+    await state.clear()
+
 @dp.callback_query(F.data == "menu_broadcast", F.from_user.id == OWNER_ID)
 async def broadcast_cb(c: CallbackQuery, state: FSMContext):
     await c.message.answer("Kirim BC:"); await state.set_state(AdminStates.waiting_for_broadcast)
@@ -401,9 +465,12 @@ async def reset_fsub_darurat(m: Message):
 async def close_panel(c: CallbackQuery): await c.message.delete()
 
 async def main():
-    await init_db(); await bot.delete_webhook(drop_pending_updates=True)
+    await init_db(); 
+    await init_payment_table()
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
