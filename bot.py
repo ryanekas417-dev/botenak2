@@ -88,6 +88,22 @@ async def init_db():
             owner_id INTEGER, 
             invited_user INTEGER PRIMARY KEY, 
             status TEXT DEFAULT 'valid')""")
+
+        async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        # ... (kode create table kamu yang sudah ada) ...
+        
+        await db.commit()
+
+        # --- TAMBAHKAN KODE INI DI BAWAH COMMIT ---
+        try:
+            # Perintah ini untuk nambahin kolom 'title' ke tabel 'media' yang sudah ada
+            await db.execute("ALTER TABLE media ADD COLUMN title TEXT")
+            await db.commit()
+            print("✅ Berhasil menambah kolom title!")
+        except:
+            # Kalau kolomnya sudah ada (setelah running sekali), dia bakal ke sini
+            pass
             
         await db.commit()
 # ================= PAYMENT DATABASE =================
@@ -892,6 +908,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
