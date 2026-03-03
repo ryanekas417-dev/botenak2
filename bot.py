@@ -89,7 +89,7 @@ async def init_db():
             invited_user INTEGER PRIMARY KEY, 
             status TEXT DEFAULT 'valid')""")
 
-        async def init_db():
+async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         # ... (kode create table kamu yang sudah ada) ...
         
@@ -908,6 +908,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
