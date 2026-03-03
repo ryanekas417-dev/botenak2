@@ -1,3 +1,4 @@
+#asu
 import asyncio
 import uuid
 import os
@@ -214,7 +215,6 @@ async def start_handler(m: Message):
                     try:
                         await db.execute("INSERT OR IGNORE INTO views (user_id, media_code) VALUES (?, ?)", 
                                          (m.from_user.id, target_code))
-                        )
                         await db.commit()
                     except Exception as e:
                         print(f"Error logging view: {e}")
@@ -892,6 +892,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
