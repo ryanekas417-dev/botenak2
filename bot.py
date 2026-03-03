@@ -302,7 +302,6 @@ async def add_part_to_list(msg, state, p_title):
     await msg.answer(f"✅ Part {len(parts)} siap.\nJudul: **{p_title}**", reply_markup=kb)
     await state.set_state(PostMedia.waiting_for_final_confirm)
 
-@dp.callback_query(PostMedia.waiting_for_final_confirm, F.data == "final_post")
 @dp.callback_query(AdminStates.waiting_for_final_confirm, F.data == "final_post")
 async def check_cover_mode(c: CallbackQuery, state: FSMContext):
     mode = await get_config("cover_mode", "OFF")
@@ -314,6 +313,7 @@ async def check_cover_mode(c: CallbackQuery, state: FSMContext):
         # Mode OFF, minta cover manual dulu
         await c.message.answer("🖼 **COVER MODE OFF**\nSilakan kirim foto yang ingin dijadikan cover untuk post ini:")
         await state.set_state(AdminStates.waiting_for_manual_cover)
+
 @dp.message(AdminStates.waiting_for_manual_cover, F.photo)
 async def handle_manual_cover(m: Message, state: FSMContext):
     # Simpan file_id cover khusus untuk post ini saja ke state
@@ -907,6 +907,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
