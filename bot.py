@@ -595,12 +595,11 @@ async def save_log_group(m: Message, state: FSMContext):
 @dp.callback_query(F.data == "top_weekly")
 async def top_weekly_handler(c: CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
-        # Ambil top 5 video berdasarkan view unik 7 hari terakhir
+        # Query ini mengambil judul dari tabel media berdasarkan hitungan di tabel views
         query = """
             SELECT m.title, COUNT(v.user_id) as total_views, m.code
             FROM views v
             JOIN media m ON v.media_code = m.code
-            WHERE v.viewed_at >= datetime('now', '-7 days')
             GROUP BY v.media_code
             ORDER BY total_views DESC
             LIMIT 5
@@ -609,17 +608,22 @@ async def top_weekly_handler(c: CallbackQuery):
             rows = await cur.fetchall()
             
     if not rows:
-        return await c.answer("Belum ada data tontonan minggu ini.", show_alert=True)
+        return await c.answer("❌ Belum ada data tontonan!", show_alert=True)
     
-    text = "🏆 **TOP 5 VIDEO MINGGU INI**\n\n"
-    kb = []
+    text = "🏆 **TOP 5 VIDEO TERPOPULER**\n\n"
+    kb_list = []
+    bot_username = (await bot.get_me()).username
+
     for i, row in enumerate(rows, 1):
-        text += f"{i}. {row[0]} ({row[1]} views)\n"
-        kb.append([InlineKeyboardButton(text=f"▶️ NONTON: {row[0]}", url=f"https://t.me/{(await bot.get_me()).username}?start={row[2]}")])
+        judul = row[0][:30] + "..." if len(row[0]) > 30 else row[0]
+        text += f"{i}. {judul} — ({row[1]} views)\n"
+        # Tombol mengarah ke link start bot dengan kode media
+        kb_list.append([InlineKeyboardButton(text=f"▶️ NONTON PART {i}", url=f"https://t.me/{bot_username}?start={row[2]}")])
     
-    kb.append([InlineKeyboardButton(text="🔙 KEMBALI", callback_data="close_panel")])
-    # Ganti answer jadi edit_text
-    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    kb_list.append([InlineKeyboardButton(text="🔙 KEMBALI", callback_data="close_panel")])
+    
+    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
+    
 # --- FITUR 10 & 11: REFERRAL SYSTEM ---
 @dp.callback_query(F.data == "menu_ref")
 async def ref_info(c: CallbackQuery):
@@ -776,6 +780,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
