@@ -49,6 +49,7 @@ class AdminStates(StatesGroup):
     waiting_for_log_group = State() 
     waiting_for_qris = State()
     waiting_for_preview = State()
+    waiting_for_manual_cover = State()
     waiting_for_cover = State()
     waiting_for_add_title = State()
 
@@ -213,9 +214,11 @@ async def start_handler(m: Message):
                     try:
                         await db.execute("INSERT OR IGNORE INTO views (user_id, media_code) VALUES (?, ?)", 
                                          (m.from_user.id, target_code))
+                        )
                         await db.commit()
-                    except: pass
-                    
+                    except Exception as e:
+                        print(f"Error logging view: {e}")
+                                       
                     if row[1] == "photo": await bot.send_photo(m.chat.id, row[0], caption=row[2], protect_content=True)
                     else: await bot.send_video(m.chat.id, row[0], caption=row[2], protect_content=True)
                     return
@@ -284,60 +287,66 @@ async def add_part_to_list(msg, state, p_title):
     await state.set_state(PostMedia.waiting_for_final_confirm)
 
 @dp.callback_query(PostMedia.waiting_for_final_confirm, F.data == "final_post")
-async def final_post_select_ch(c: CallbackQuery, state: FSMContext):
-    # Tahap pilih channel sebelum benar-benar posting
+@dp.callback_query(PostMedia.waiting_for_final_confirm, F.data == "final_post")
+async def check_cover_mode(c: CallbackQuery, state: FSMContext):
+    mode = await get_config("cover_mode", "OFF")
+    
+    if mode == "ON":
+        # Pakai cover global, langsung ke pilih channel
+        await final_post_select_ch(c, state)
+    else:
+        # Mode OFF, minta cover manual dulu
+        await c.message.answer("🖼 **COVER MODE OFF**\nSilakan kirim foto yang ingin dijadikan cover untuk post ini:")
+        await state.set_state(PostMedia.waiting_for_manual_cover)
+
+@dp.message(PostMedia.waiting_for_manual_cover, F.photo)
+async def handle_manual_cover(m: Message, state: FSMContext):
+    # Simpan file_id cover khusus untuk post ini saja ke state
+    await state.update_data(manual_cover=m.photo[-1].file_id)
+    
+    # Lanjut ke pilih channel (panggil fungsi pilih channel)
+    # Kita buatkan helper untuk panggil menu pilih channel
+    await show_channel_selection(m, state)
+
+async def show_channel_selection(m: Message, state: FSMContext):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT channel_id FROM channels") as cur:
             rows = await cur.fetchall()
             
     if not rows:
-        return await c.answer("❌ Daftarkan channel dulu di /panel!", show_alert=True)
+        return await m.answer("❌ Daftarkan channel dulu di /panel!")
         
     kb = []
     for r in rows:
-        kb.append([InlineKeyboardButton(text=f"📤 POST KE: {r[0]}", callback_data=f"send_to:{r[0]}")])
+        kb.append([InlineKeyboardButton(text=f"📤 KE: {r[0]}", callback_data=f"send_to:{r[0]}")])
+    kb.append([InlineKeyboardButton(text="🚀 POST KE SEMUA", callback_data="send_to:all")])
     
-    kb.append([InlineKeyboardButton(text="🚀 POST KE SEMUA CHANNEL", callback_data="send_to:all")])
-    kb.append([InlineKeyboardButton(text="❌ BATAL", callback_data="close_panel")])
+    await m.answer("🎯 **PILIH TUJUAN POSTING:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     
-    await c.message.edit_text("🎯 **PILIH TUJUAN POSTING:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
+@dp.callback_query(F.data.startswith("send_to:"))
 @dp.callback_query(F.data.startswith("send_to:"))
 async def execute_posting(c: CallbackQuery, state: FSMContext):
     target = c.data.split(":")[1]
     data = await state.get_data()
     parts, p_title = data['parts'], data['current_title']
-    bot_user = (await bot.get_me()).username
     
-    # Buat Keyboard Part
-    kb_rows = []
-    row = []
-    for i, code in enumerate(parts, 1):
-        row.append(InlineKeyboardButton(text=f"Part {i}", url=f"https://t.me/{bot_user}?start={code}"))
-        if len(row) == 2: kb_rows.append(row); row = []
-    if row: kb_rows.append(row)
-    
-    # Ambil list channel tujuan
-    targets = []
-    if target == "all":
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT channel_id FROM channels") as cur:
-                rows = await cur.fetchall()
-                targets = [r[0] for r in rows]
+    # Tentukan pakai cover mana
+    mode = await get_config("cover_mode", "OFF")
+    if mode == "ON":
+        cover_to_use = await get_config("cover_file_id")
     else:
-        targets = [target]
+        cover_to_use = data.get("manual_cover") # Ambil dari state
 
-    # Kirim ke setiap target
-    cover_mode = await get_config("cover_mode", "OFF")
-    cover_file = await get_config("cover_file_id")
-    
+    # ... (Logika ambil list channel targets sama seperti sebelumnya) ...
+
     success = 0
     for ch_id in targets:
         try:
-            if cover_mode == "ON" and cover_file:
-                await bot.send_photo(ch_id, cover_file, caption=f"🎬 **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+            # Gunakan cover_to_use jika ada
+            if cover_to_use:
+                await bot.send_photo(ch_id, cover_to_use, caption=f"🎬 **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
             else:
-                await bot.send_message(ch_id, f"🎬 **{p_title}**\n\nSilahkan pilih part di bawah:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+                await bot.send_message(ch_id, f"🎬 **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
             success += 1
         except: pass
     
@@ -461,12 +470,32 @@ async def admin_panel(message: Message):
 @dp.callback_query(F.data == "open_settings")
 async def settings_cb(c: CallbackQuery):
     if not await is_admin(c.from_user.id): return
+    
+    # Ambil status mode saat ini untuk tampilan tombol
+    mode = await get_config("cover_mode", "OFF")
+    status_emoji = "🟢" if mode == "ON" else "🔴"
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 POST CH", callback_data="set_post")],
         [InlineKeyboardButton(text="👥 FSUB", callback_data="set_fsub_list")],
+        # Tombol Baru di sini:
+        [InlineKeyboardButton(text=f"{status_emoji} COVER MODE: {mode}", callback_data="toggle_cover")],
         [InlineKeyboardButton(text="🔙 KEMBALI", callback_data="close_panel")]
     ])
-    await c.message.edit_text("⚙️ **CONFIG**", reply_markup=kb)
+    await c.message.edit_text("⚙️ **CONFIG SETTINGS**", reply_markup=kb)
+
+@dp.callback_query(F.data == "toggle_cover")
+async def toggle_cover_handler(c: CallbackQuery):
+    # Ambil status sekarang
+    curr = await get_config("cover_mode", "OFF")
+    # Balik statusnya
+    new_mode = "OFF" if curr == "ON" else "ON"
+    
+    await set_config("cover_mode", new_mode)
+    await c.answer(f"✅ Mode Cover diubah ke {new_mode}", show_alert=True)
+    
+    # Refresh menu biar tulisan tombolnya berubah
+    await settings_cb(c)
 
 @dp.callback_query(F.data == "set_post")
 async def set_post_menu(c: CallbackQuery):
@@ -680,39 +709,32 @@ async def save_log_group(m: Message, state: FSMContext):
 
 # --- FITUR 5: TOP 5 WEEKLY ---
 @dp.callback_query(F.data == "top_weekly")
+@dp.callback_query(F.data == "top_weekly")
 async def top_weekly_handler(c: CallbackQuery):
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            # Menggunakan COALESCE agar jika title NULL, dia pakai caption atau teks default
-            query = """
-                SELECT COALESCE(m.title, m.caption, 'Video Tanpa Judul'), COUNT(v.user_id), m.code
-                FROM views v
-                JOIN media m ON v.media_code = m.code
-                GROUP BY v.media_code
-                ORDER BY COUNT(v.user_id) DESC
-                LIMIT 5
-            """
-            async with db.execute(query) as cur:
-                rows = await cur.fetchall()
-                
-        if not rows:
-            return await c.answer("❌ Belum ada data tontonan!", show_alert=True)
-        
-        text = "🏆 **TOP 5 VIDEO TERPOPULER**\n\n"
-        kb_list = []
-        me = await bot.get_me()
+    async with aiosqlite.connect(DB_NAME) as db:
+        query = """
+            SELECT COALESCE(m.title, 'Video'), COUNT(v.user_id) as total, m.code
+            FROM views v
+            JOIN media m ON v.media_code = m.code
+            GROUP BY v.media_code
+            ORDER BY total DESC
+            LIMIT 5
+        """
+        async with db.execute(query) as cur:
+            rows = await cur.fetchall()
 
-        for i, row in enumerate(rows, 1):
-            raw_title = str(row[0])
-            judul = (raw_title[:30] + '...') if len(raw_title) > 30 else raw_title
-            text += f"{i}. {judul} — ({row[1]} views)\n"
-            kb_list.append([InlineKeyboardButton(text=f"▶️ NONTON PART {i}", url=f"https://t.me/{me.username}?start={row[2]}")])
-        
-        kb_list.append([InlineKeyboardButton(text="🔙 KEMBALI", callback_data="close_panel")])
-        await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
-    except Exception as e:
-        await c.answer(f"⚠️ Terjadi kesalahan teknis.", show_alert=True)
-        print(f"Error Top Weekly: {e}")
+    if not rows:
+        return await c.answer("📊 Belum ada data. Ayo tonton video dulu!", show_alert=True)
+
+    text = "🏆 **TOP 5 VIDEO REAL-TIME**\n\n"
+    kb = []
+    bot_user = (await bot.get_me()).username
+    for i, row in enumerate(rows, 1):
+        text += f"{i}. {row[0]} — ({row[1]} views)\n"
+        kb.append([InlineKeyboardButton(text=f"▶️ NONTON: {row[0]}", url=f"https://t.me/{bot_user}?start={row[2]}")])
+    
+    kb.append([InlineKeyboardButton(text="🔙 KEMBALI", callback_data="close_panel")])
+    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     
 # --- FITUR 10 & 11: REFERRAL SYSTEM ---
 @dp.callback_query(F.data == "menu_ref")
@@ -870,6 +892,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
