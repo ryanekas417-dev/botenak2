@@ -339,32 +339,64 @@ async def show_channel_selection(m: Message, state: FSMContext):
     await m.answer("🎯 **PILIH TUJUAN POSTING:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     
 @dp.callback_query(F.data.startswith("send_to:"))
-@dp.callback_query(F.data.startswith("send_to:"))
 async def execute_posting(c: CallbackQuery, state: FSMContext):
     target = c.data.split(":")[1]
     data = await state.get_data()
-    parts, p_title = data['parts'], data['current_title']
     
-    # Tentukan pakai cover mana
-    mode = await get_config("cover_mode", "OFF")
-    if mode == "ON":
-        cover_to_use = await get_config("cover_file_id")
+    # Ambil data yang diperlukan dari state
+    parts = data.get('parts', [])
+    p_title = data.get('current_title', 'Video Baru')
+    
+    # 1. DEFINISIKAN TARGETS (PENTING!)
+    targets = []
+    if target == "all":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT channel_id FROM channels") as cur:
+                rows = await cur.fetchall()
+                targets = [r[0] for r in rows]
     else:
-        cover_to_use = data.get("manual_cover") # Ambil dari state
+        # Jika cuma satu channel, masukkan ke dalam list
+        targets = [target]
 
-    # ... (Logika ambil list channel targets sama seperti sebelumnya) ...
+    if not targets:
+        return await c.answer("❌ Tidak ada channel tujuan!", show_alert=True)
 
+    # 2. Buat Keyboard Part
+    bot_info = await bot.get_me()
+    kb_rows = []
+    row = []
+    for i, code in enumerate(parts, 1):
+        row.append(InlineKeyboardButton(text=f"Part {i}", url=f"https://t.me/{bot_info.username}?start={code}"))
+        if len(row) == 2:
+            kb_rows.append(row)
+            row = []
+    if row: kb_rows.append(row)
+    
+    # 3. Tentukan Cover
+    mode = await get_config("cover_mode", "OFF")
+    cover_to_use = await get_config("cover_file_id") if mode == "ON" else data.get("manual_cover")
+
+    # 4. MULAI KIRIM
     success = 0
     for ch_id in targets:
         try:
-            # Gunakan cover_to_use jika ada
             if cover_to_use:
-                await bot.send_photo(ch_id, cover_to_use, caption=f"🎬 **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+                await bot.send_photo(
+                    ch_id, 
+                    cover_to_use, 
+                    caption=f" **{p_title}**\n\n", 
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                )
             else:
-                await bot.send_message(ch_id, f"🎬 **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+                await bot.send_message(
+                    ch_id, 
+                    f" **{p_title}**\n\n", 
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                )
             success += 1
-        except: pass
-    
+        except Exception as e:
+            print(f"Gagal kirim ke {ch_id}: {e}")
+
     await c.message.edit_text(f"✅ Berhasil dipost ke {success} channel.")
     await state.clear()
 @dp.message(F.chat.type == "private", (F.photo | F.video | F.document), StateFilter(PostMedia.waiting_for_final_confirm))
@@ -907,6 +939,7 @@ async def main():
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
