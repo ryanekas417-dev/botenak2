@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, 
-    FSInputFile, CallbackQuery
+    FSInputFile, CallbackQuery, ChatMemberUpdated # <--- Ganti/Tambah ini
 )
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -26,14 +26,27 @@ dp = Dispatcher(storage=MemoryStorage())
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, "media.db")
 
+async def loading_anim(msg: Message):
+    frames = ["⏳ Loading", "⏳ Loading.", "⏳ Loading..", "⏳ Loading..."]
+    temp_msg = await msg.answer(frames[0])
+    for _ in range(2): # 2 kali putaran
+        for frame in frames:
+            try:
+                await temp_msg.edit_text(frame)
+                await asyncio.sleep(0.3)
+            except: break
+    return temp_msg
 # ================= STATES =================
 class AdminStates(StatesGroup):
     waiting_for_channel_post = State()
+    waiting_for_ref_agree = State()
+    waiting_for_ref_channel = State()
     waiting_for_vip_group = State()
     waiting_for_fsub_list = State()
     waiting_for_broadcast = State()
     waiting_for_reply = State()
     waiting_for_new_admin = State()
+    waiting_for_log_group = State() 
     waiting_for_qris = State()
     waiting_for_preview = State()
     waiting_for_cover = State()
@@ -51,13 +64,30 @@ class PostMedia(StatesGroup):
 # ================= DATABASE HELPER =================
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS media (code TEXT PRIMARY KEY, file_id TEXT, type TEXT, caption TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
+        # Tabel Media Dasar
+        await db.execute("CREATE TABLE IF NOT EXISTS media (code TEXT PRIMARY KEY, file_id TEXT, type TEXT, caption TEXT, title TEXT)")
+        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         await db.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
         await db.execute("CREATE TABLE IF NOT EXISTS admins (admin_id INTEGER PRIMARY KEY)")
         await db.execute("CREATE TABLE IF NOT EXISTS titles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)")
+        
+        # Fitur 4 & 5: Content Analytics & Top Weekly
+        await db.execute("""CREATE TABLE IF NOT EXISTS views (
+            user_id INTEGER, 
+            media_code TEXT, 
+            viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, media_code))""")
+            
+        # Fitur 7: Multi Channel Post
+        await db.execute("CREATE TABLE IF NOT EXISTS channels (channel_id TEXT PRIMARY KEY, name TEXT)")
+        
+        # Fitur 11: Referral System
+        await db.execute("""CREATE TABLE IF NOT EXISTS referrals (
+            owner_id INTEGER, 
+            invited_user INTEGER PRIMARY KEY, 
+            status TEXT DEFAULT 'valid')""")
+            
         await db.commit()
-
 # ================= PAYMENT DATABASE =================
 async def init_payment_table():
     async with aiosqlite.connect(DB_NAME) as db:
@@ -150,7 +180,8 @@ async def get_titles_kb():
 def member_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 DONASI", callback_data="menu_donasi"), InlineKeyboardButton(text="❓ ASK", callback_data="menu_ask")],
-        [InlineKeyboardButton(text="💎 ORDER VIP", callback_data="menu_vip"), InlineKeyboardButton(text="👀 PREVIEW VIP", callback_data="vip_preview")]
+        [InlineKeyboardButton(text="💎 ORDER VIP", callback_data="menu_vip"), InlineKeyboardButton(text="👀 PREVIEW VIP", callback_data="vip_preview")],
+        [InlineKeyboardButton(text="🏆 TOP 5 WEEKLY", callback_data="top_weekly"), InlineKeyboardButton(text="🚀 REFERRAL VIP", callback_data="menu_ref")]
     ])
 
 # ================= MEMBER & FSUB =================
@@ -178,6 +209,13 @@ async def start_handler(m: Message):
             async with db.execute("SELECT file_id, type, caption FROM media WHERE code=?", (target_code,)) as cur:
                 row = await cur.fetchone()
                 if row:
+                    # LOGIKA ANALYTICS (Fitur 4)
+                    try:
+                        await db.execute("INSERT OR IGNORE INTO views (user_id, media_code) VALUES (?, ?)", 
+                                         (m.from_user.id, target_code))
+                        await db.commit()
+                    except: pass
+                    
                     if row[1] == "photo": await bot.send_photo(m.chat.id, row[0], caption=row[2], protect_content=True)
                     else: await bot.send_video(m.chat.id, row[0], caption=row[2], protect_content=True)
                     return
@@ -265,27 +303,31 @@ async def final_post_handler(c: CallbackQuery, state: FSMContext):
     parts, p_title = data['parts'], data['current_title']
     bot_user = (await bot.get_me()).username
     
+    # Generate Keyboard Parts
     kb_rows = []
-    if len(parts) == 1:
-        kb_rows.append([InlineKeyboardButton(text="🎬 TONTON", url=f"https://t.me/{bot_user}?start={parts[0]}")])
-    else:
-        row = []
-        for i, code in enumerate(parts, 1):
-            row.append(InlineKeyboardButton(text=f"Part {i}", url=f"https://t.me/{bot_user}?start={code}"))
-            if len(row) == 2:
-                kb_rows.append(row); row = []
-        if row: kb_rows.append(row)
-
-    ch = await get_config("channel_post")
-    cover = await get_config("cover_file_id")
-    if ch:
-        try:
-            if cover: await bot.send_photo(ch, cover, caption=f" **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
-            else: await bot.send_message(ch, f" **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
-            await c.message.answer("✅ Posted!")
-        except Exception as e: await c.message.answer(f"❌ Error: {e}")
+    row = []
+    for i, code in enumerate(parts, 1):
+        row.append(InlineKeyboardButton(text=f"Part {i}", url=f"https://t.me/{bot_user}?start={code}"))
+        if len(row) == 2: kb_rows.append(row); row = []
+    if row: kb_rows.append(row)
+    
+    # MULTI CHANNEL (Fitur 7) & COVER (Fitur 9)
+    ch_id = await get_config("channel_post") # Nanti bisa dikembangin ke multi-loop
+    cover_mode = await get_config("cover_mode", "OFF")
+    cover_file = await get_config("cover_file_id")
+    
+    load = await loading_anim(c.message)
+    try:
+        if cover_mode == "ON" and cover_file:
+            await bot.send_photo(ch_id, cover_file, caption=f"🎬 **{p_title}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+        else:
+            # Jika mode OFF, kirim tanpa cover atau kirim file part 1 sebagai cover
+            await bot.send_message(ch_id, f"🎬 **{p_title}**\n\nSilahkan pilih part di bawah:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+        await load.edit_text("✅ BERHASIL DI POST!")
+    except Exception as e:
+        await load.edit_text(f"❌ GAGAL: {e}")
+    
     await state.clear()
-
 # ================= MEMBER INTERACTION (FORWARDED) =================
 @dp.callback_query(F.data == "menu_ask")
 async def ask_btn(c: CallbackQuery, state: FSMContext):
@@ -324,10 +366,27 @@ async def preview_vip(c: CallbackQuery):
 
 @dp.message(MemberStates.waiting_for_vip_ss, F.photo)
 async def process_vip_ss(m: Message, state: FSMContext):
+    # Kirim ke Admin (Owner)
     await m.forward(OWNER_ID)
-    await bot.send_message(OWNER_ID, f"💎 **VIP SS: {m.from_user.id}**", 
-                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 REPLY", callback_data=f"reply:{m.from_user.id}")]]))
-    await m.reply("✅ SS Terkirim."); await state.clear()
+    
+    # Tombol buat Admin ambil tindakan
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ APPROVE", callback_data=f"vip_action:approve:{m.from_user.id}"),
+            InlineKeyboardButton(text="❌ REJECT", callback_data=f"vip_action:reject:{m.from_user.id}")
+        ],
+        [InlineKeyboardButton(text="💬 CHAT USER", callback_data=f"reply:{m.from_user.id}")]
+    ])
+    
+    await bot.send_message(
+        OWNER_ID, 
+        f"💎 **BUKTI TRANSFER BARU**\n\n"
+        f"User: `{m.from_user.id}`\n"
+        f"Nama: {m.from_user.full_name}",
+        reply_markup=kb
+    )
+    await m.reply("✅ Bukti transfer telah dikirim ke Admin. Mohon tunggu proses verifikasi.")
+    await state.clear()
 
 # ================= ADMIN & CONFIG =================
 @dp.message(Command("panel"))
@@ -338,6 +397,8 @@ async def admin_panel(message: Message):
         [InlineKeyboardButton(text="🖼 COVER", callback_data="set_cover"), InlineKeyboardButton(text="🖼 QRIS", callback_data="set_qris")],
         [InlineKeyboardButton(text="📺 PREVIEW", callback_data="set_preview")],
         [InlineKeyboardButton(text="👑 VIP GROUP", callback_data="set_vip_group")],
+        [InlineKeyboardButton(text="📜 SET LOG GROUP", callback_data="set_log_group")],
+        [InlineKeyboardButton(text="🎯 SET REF CHANNEL", callback_data="set_ref_ch")],
         [InlineKeyboardButton(text="📡 BC", callback_data="menu_broadcast"), InlineKeyboardButton(text="📦 DB", callback_data="menu_db")],
         [InlineKeyboardButton(text="❌ TUTUP", callback_data="close_panel")]
     ]
@@ -385,6 +446,58 @@ async def process_reply_send(m: Message, state: FSMContext):
     try: await m.copy_to(d['target']); await m.reply("✅ OK")
     except: await m.reply("❌ Gagal")
     await state.clear()
+
+@dp.callback_query(F.data.startswith("vip_action:"))
+async def vip_decision(c: CallbackQuery):
+    # Cek apakah yang mencet beneran admin
+    if not await is_admin(c.from_user.id):
+        return await c.answer("Lu bukan admin!", show_alert=True)
+
+    data = c.data.split(":")
+    action = data[1]     # approve atau reject
+    target_id = int(data[2]) # ID user yang mau di-acc
+    
+    log_ch = await get_config("log_group") # Ambil ID grup log dari database
+    
+    if action == "approve":
+        vip_group = await get_config("vip_group")
+        if not vip_group: 
+            return await c.answer("❌ Error: Group VIP belum diset di /panel!", show_alert=True)
+        
+        try:
+            # Fitur 2: Link otomatis max 1 orang
+            link = await bot.create_chat_invite_link(chat_id=vip_group, member_limit=1)
+            
+            await bot.send_message(
+                target_id, 
+                f"✅ **PEMBAYARAN DISETUJUI!**\n\nSelamat datang di VIP. Ini link akses kamu:\n{link.invite_link}\n\n*Note: Link ini hanya bisa diklik satu kali.*"
+            )
+            await c.message.edit_text(f"✅ User `{target_id}` Berhasil di-Approve.")
+
+            # Fitur 3: Kirim ke VIP JOIN LOGGER
+            if log_ch:
+                try:
+                    # Ambil info user buat di log
+                    u = await bot.get_chat(target_id)
+                    log_msg = (
+                        f"👥 **VIP JOIN LOGGER**\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"👤 **Nama:** [{u.first_name}](tg://user?id={target_id})\n"
+                        f"🆔 **ID:** `{target_id}`\n"
+                        f"🔗 **Profil:** [Klik Disini](tg://user?id={target_id})\n"
+                        f"✅ **Status:** Manual Approved"
+                    )
+                    await bot.send_message(log_ch, log_msg)
+                except: pass # Biar ga eror kalau bot belum join grup log
+                
+        except Exception as e:
+            await c.answer(f"Gagal buat link: {e}", show_alert=True)
+            
+    elif action == "reject":
+        try:
+            await bot.send_message(target_id, "❌ **PEMBAYARAN DITOLAK**\n\nMohon maaf, bukti transfer kamu tidak valid atau tidak terbaca. Silahkan hubungi admin.")
+            await c.message.edit_text(f"❌ User `{target_id}` Berhasil di-Reject.")
+        except: pass
 
 @dp.callback_query(F.data == "set_post")
 async def set_post_cb(c: CallbackQuery, state: FSMContext):
@@ -464,14 +577,206 @@ async def reset_fsub_darurat(m: Message):
 @dp.callback_query(F.data == "close_panel")
 async def close_panel(c: CallbackQuery): await c.message.delete()
 
+@dp.callback_query(F.data == "set_log_group")
+async def set_log_group_btn(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("Kirim ID Group untuk Log VIP (Contoh: -100123456789):")
+    await state.set_state(AdminStates.waiting_for_log_group)
+
+# Daftarkan state baru ini di class AdminStates (di paling atas kode)
+# Tambahkan: waiting_for_log_group = State() 
+
+@dp.message(AdminStates.waiting_for_log_group)
+async def save_log_group(m: Message, state: FSMContext):
+    await set_config("log_group", m.text.strip())
+    await m.reply("✅ VIP Log Group Berhasil Diset!")
+    await state.clear()
+
+# --- FITUR 5: TOP 5 WEEKLY ---
+@dp.callback_query(F.data == "top_weekly")
+async def top_weekly_handler(c: CallbackQuery):
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Ambil top 5 video berdasarkan view unik 7 hari terakhir
+        query = """
+            SELECT m.title, COUNT(v.user_id) as total_views, m.code
+            FROM views v
+            JOIN media m ON v.media_code = m.code
+            WHERE v.viewed_at >= datetime('now', '-7 days')
+            GROUP BY v.media_code
+            ORDER BY total_views DESC
+            LIMIT 5
+        """
+        async with db.execute(query) as cur:
+            rows = await cur.fetchall()
+            
+    if not rows:
+        return await c.answer("Belum ada data tontonan minggu ini.", show_alert=True)
+    
+    text = "🏆 **TOP 5 VIDEO MINGGU INI**\n\n"
+    kb = []
+    for i, row in enumerate(rows, 1):
+        text += f"{i}. {row[0]} ({row[1]} views)\n"
+        kb.append([InlineKeyboardButton(text=f"▶️ NONTON: {row[0]}", url=f"https://t.me/{(await bot.get_me()).username}?start={row[2]}")])
+    
+    kb.append([InlineKeyboardButton(text="🔙 KEMBALI", callback_data="close_panel")])
+    # Ganti answer jadi edit_text
+    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+# --- FITUR 10 & 11: REFERRAL SYSTEM ---
+@dp.callback_query(F.data == "menu_ref")
+async def ref_info(c: CallbackQuery):
+    text = (
+        "🚀 **REFERRAL VIP SYSTEM**\n\n"
+        "Ajak 20 orang join bot ini dan dapatkan AKSES VIP GRATIS!\n"
+        "1. Klik setuju untuk buat link.\n"
+        "2. Sebar link kamu.\n"
+        "3. Jika capai 20 orang, klik klaim."
+    )
+    kb = [[InlineKeyboardButton(text="✅ SETUJU & BUAT LINK", callback_data="gen_ref_link")],
+          [InlineKeyboardButton(text="📊 CEK STATUS / KLAIM", callback_data="status_ref")]]
+    await c.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# --- SET CHANNEL REFERRAL ---
+@dp.callback_query(F.data == "set_ref_ch")
+async def set_ref_ch_btn(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("Kirim username channel (@channel) atau forward pesan dari channel tersebut:")
+    await state.set_state(AdminStates.waiting_for_ref_channel)
+
+@dp.message(AdminStates.waiting_for_ref_channel)
+async def save_ref_ch(m: Message, state: FSMContext):
+    ch_id = ""
+    if m.forward_from_chat: ch_id = m.forward_from_chat.id
+    elif m.text.startswith("@"): ch_id = m.text
+    else: return await m.reply("Gagal. Kirim @username atau forward post.")
+    
+    await set_config("ref_channel", str(ch_id))
+    await m.reply(f"✅ Channel Referral Set: {ch_id}")
+    await state.clear()
+
+# --- GENERATE LINK KHUSUS (Fitur 10) ---
+# --- FITUR 10 & 11: REFERRAL SYSTEM (OPTIMIZED) ---
+
+@dp.callback_query(F.data == "menu_ref")
+async def ref_info(c: CallbackQuery):
+    # Tahap 1: Penjelasan awal (Sesuai permintaanmu)
+    text = (
+        "🚀 **PROGRAM REFERRAL VIP**\n\n"
+        "Dapatkan akses VIP Gratis dengan mengajak 20 teman!\n\n"
+        "**Cara Kerja:**\n"
+        "1. Klik setuju untuk membuat link referral khusus.\n"
+        "2. Sebarkan link tersebut ke teman atau grup.\n"
+        "3. Setiap orang yang join lewat linkmu, poin bertambah.\n"
+        "4. Setelah 20 poin, kamu bisa klaim hadiah ke Admin."
+    )
+    kb = [
+        [InlineKeyboardButton(text="✅ SETUJU & BUAT LINK", callback_data="gen_ref_link")],
+        [InlineKeyboardButton(text="❌ TOLAK", callback_data="close_panel")]
+    ]
+    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data == "gen_ref_link")
+async def gen_ref_handler(c: CallbackQuery):
+    ref_ch = await get_config("ref_channel")
+    if not ref_ch: 
+        return await c.answer("❌ Admin belum mengatur Channel Referral!", show_alert=True)
+    
+    try:
+        # Tahap 2: Link baru dibuat HANYA jika setuju
+        link = await bot.create_chat_invite_link(chat_id=ref_ch, name=f"REF_{c.from_user.id}")
+        
+        text = (
+            "✅ **LINK REFERRAL KAMU SIAP!**\n\n"
+            f"Silakan sebarkan link ini:\n`{link.invite_link}`\n\n"
+            "Bot akan memberitahumu setiap ada orang yang join."
+        )
+        kb = [[InlineKeyboardButton(text="📊 CEK PROGRES", callback_data="status_ref")]]
+        await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except Exception as e:
+        await c.message.answer(f"❌ Gagal: Pastikan bot Admin di {ref_ch}")
+
+@dp.chat_member()
+async def tracking_public_join(event: ChatMemberUpdated):
+    # Tahap 3: Notifikasi Pribadi setiap ada yang join
+    if event.new_chat_member.status == "member":
+        invite_link = event.invite_link
+        if invite_link and invite_link.name and invite_link.name.startswith("REF_"):
+            try:
+                inviter_id = int(invite_link.name.split("_")[1])
+                new_user_id = event.from_user.id
+                if inviter_id == new_user_id: return
+
+                async with aiosqlite.connect(DB_NAME) as db:
+                    # Anti-cheat: satu user diajak cuma dihitung sekali
+                    res = await db.execute("SELECT 1 FROM referrals WHERE invited_user=?", (new_user_id,))
+                    if await res.fetchone(): return
+
+                    await db.execute("INSERT INTO referrals (owner_id, invited_user) VALUES (?, ?)", (inviter_id, new_user_id))
+                    async with db.execute("SELECT COUNT(*) FROM referrals WHERE owner_id=?", (inviter_id,)) as cur:
+                        count = (await cur.fetchone())[0]
+                    await db.commit()
+                
+                # Kasih tau secara pribadi
+                if count == 20:
+                    text_win = "🎊 **SELAMAT!** Kamu berhasil mengajak 20 orang!\n\nKlik tombol di bawah untuk klaim hadiah VIP kamu."
+                    kb_win = [[InlineKeyboardButton(text="🎁 KLAIM HADIAH VIP", callback_data="klaim_ref_reward")]]
+                    await bot.send_message(inviter_id, text_win, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_win))
+                else:
+                    await bot.send_message(inviter_id, f"🔔 **Poin Masuk!**\nSeseorang join via link kamu.\nTotal: `{count}` / 20")
+            except: pass
+
+@dp.callback_query(F.data == "status_ref")
+async def status_ref(c: CallbackQuery):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT COUNT(*) FROM referrals WHERE owner_id=?", (c.from_user.id,)) as cur:
+            count = (await cur.fetchone())[0]
+            
+    text = f"📊 **STATUS REFERRAL**\n\nProgres: `{count}` / 20 orang."
+    kb = []
+    if count >= 20:
+        kb.append([InlineKeyboardButton(text="🎁 KLAIM VIP", callback_data="klaim_ref_reward")])
+    kb.append([InlineKeyboardButton(text="🔙 KEMBALI", callback_data="menu_ref")])
+    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data == "klaim_ref_reward")
+async def process_klaim_ref(c: CallbackQuery):
+    # Tahap 4: Forward ke Admin untuk Approve
+    kb_admin = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ APPROVE (Kirim Link VIP)", callback_data=f"vip_action:approve:{c.from_user.id}"),
+            InlineKeyboardButton(text="❌ TOLAK", callback_data=f"reply:{c.from_user.id}")
+        ]
+    ])
+    
+    await bot.send_message(
+        OWNER_ID, 
+        f"📩 **KLAIM REFERRAL BARU**\n\n"
+        f"User: `{c.from_user.id}`\n"
+        f"Nama: {c.from_user.full_name}\n"
+        f"Poin: 20 (Sistem Terverifikasi)",
+        reply_markup=kb_admin
+    )
+    await c.message.edit_text("✅ **PERMINTAAN KLAIM TERKIRIM!**\nAdmin akan segera memberikan link VIP kamu. Mohon tunggu.")
+
+# --- SET CHANNEL REFERRAL (ADMIN ONLY) ---
+@dp.callback_query(F.data == "set_ref_ch")
+async def set_ref_ch_btn(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("Kirim username channel (@channel) tempat referral bekerja:")
+    await state.set_state(AdminStates.waiting_for_ref_channel)
+
+@dp.message(AdminStates.waiting_for_ref_channel)
+async def save_ref_ch(m: Message, state: FSMContext):
+    await set_config("ref_channel", m.text.strip())
+    await m.reply(f"✅ Channel Referral Set ke: {m.text}")
+    await state.clear()
+    
 async def main():
-    await init_db(); 
+    await init_db() 
     await init_payment_table()
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
+    
+    # WAJIB: Tambahkan allowed_updates agar bot bisa dapet info member join
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
